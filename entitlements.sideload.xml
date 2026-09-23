@@ -1,0 +1,34 @@
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>application-identifier</key>
+	<string>com.amethyst.zad626</string>
+<key>com.apple.private.security.container-required</key>
+	<string>com.amethyst.zad626</string>
+    <key>get-task-allow</key>
+    <true/>
+
+    <key>com.apple.developer.kernel.extended-virtual-addressing</key>
+    <true/>
+    <key>com.apple.developer.kernel.increased-memory-limit</key>
+    <true/>
+    <!-- This must also be authorized by the provisioning profile used to sign
+         a sideload build; otherwise iOS will strip it and Vulkan background
+         work remains unavailable. -->
+    <key>com.apple.developer.background-tasks.continued-processing.gpu</key>
+    <true/>
+
+    <!-- Allow loading ad-hoc-signed dylibs extracted at runtime (Distant
+         Horizons extracts libzstd-jni_dh-*.dylib into tmp and dlopens it) -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Give ability to change Jetsam task limit by itself -->
+    <key>com.apple.private.memorystatus</key>
+    <true/>
+
+    <!-- Custom entitlement to indicate this was installed with TrollStore, still sandboxed -->
+    <key>jb.pmap_cs.custom_trust</key>
+    <string>PMAP_CS_APP_STORE</string>
+</dict>
+</plist>

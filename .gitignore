@@ -1,0 +1,50 @@
+/packages
+/artifacts
+/build
+/JavaApp/.gradle
+/JavaApp/build
+/JavaApp/local_out
+/Natives/Witch
+/Natives/build
+.DS_Store
+xcshareddata/
+xcuserdata/
+project.xcworkspace/
+/depends
+/Natives/config.h
+entitlements.codesign.xml
+/Compare
+/.rule/
+/sample/
+/.vscode/
+/log/
+/plan/
+# Build artifacts (users can build themselves)
+/amethyst-prebuilt-libraries/build/
+# SDL3 build dir is ignored, but the resulting iOS dylibs must be committed
+# (the payload step copies them into the app and CI can't build them)
+/amethyst-prebuilt-libraries/SDL/SDL3/build_ios/*
+!/amethyst-prebuilt-libraries/SDL/SDL3/build_ios/libSDL3.dylib
+!/amethyst-prebuilt-libraries/SDL/SDL3/build_ios/libSDL3.0.dylib
+/lwgjl/*/bin/
+/lwgjl/*/.gradle/
+/lwgjl/*/.github/workflows/android/.gradle/
+/lwgjl/*/.github/workflows/android/build/
+
+# libffi configured build dirs are committed (CI needs them); ignore generated objects
+/lwgjl/*/libffi/build*/.libs/
+/lwgjl/*/libffi/build*/*.la
+/lwgjl/*/libffi/build*/src/*.o
+/lwgjl/*/libffi/build*/src/*.lo
+/lwgjl/*/libffi/build*/src/*/*.o
+/lwgjl/*/libffi/build*/src/*/*.lo
+/lwgjl/*/libffi/build*/*.dirstamp
+/lwgjl/*/libffi/build*/src/.dirstamp
+/lwgjl/*/libffi/build*/src/*/.dirstamp
+/lwgjl/*/libffi/build*/src/.deps/.dirstamp
+/lwgjl/*/libffi/build*/src/*/.deps/.dirstamp
+*.bak
+/Natives/OSMesaShim/bin/
+
+# Website moved to separate repo (witch-launcher-web)
+/web/

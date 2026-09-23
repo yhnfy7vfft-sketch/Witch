@@ -1,0 +1,256 @@
+name: Development build
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  push:
+    branches: ['beta']
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Development build
+    runs-on: macos-14
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      # Only the two GL4ES dependencies are actually consumed by the build.
+      # The vendored ANGLE tree is never compiled, and its googlesource
+      # mirrors intermittently return HTTP 502 or clone as empty repos,
+      # which poisons retries ("Unable to find current revision"). Skip it
+      # entirely; retry the needed ones and drop poisoned clones in between.
+      - name: Checkout submodules (with retries)
+        shell: bash
+        run: |
+          set -o pipefail
+          SUBMODULES="Natives/external/NG-GL4ES/3rdparty/SPIRV-Cross Natives/external/NG-GL4ES/3rdparty/glslang"
+          for i in 1 2 3 4 5 6; do
+            echo "::group::Submodule update attempt $i/6"
+            if git -c protocol.version=2 submodule sync -- $SUBMODULES && \
+               git -c protocol.version=2 submodule update --init --force --depth=1 $SUBMODULES; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            for p in $SUBMODULES; do
+              if [ -e "$p/.git" ] && ! git -C "$p" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+                rm -rf "$p"
+                echo "Removed poisoned clone: $p"
+              fi
+            done
+            echo "Attempt $i failed; retrying in 15s..."
+            sleep 15
+          done
+          exit 1
+
+      - name: Set up Xcode Version
+        run: |
+          ls -d /Applications/Xcode*.app || true
+          # Prefer the newest installed Xcode (iOS 26 SDK is required for the
+          # BGContinuedProcessingTask APIs in SceneDelegate.m); fall back to
+          # 15.4 when nothing newer is present.
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$LATEST_XCODE" ]; then
+            echo "Selected $LATEST_XCODE"
+            sudo xcode-select -s "$LATEST_XCODE"
+          else
+            sudo xcode-select -s /Applications/Xcode_15.4.app
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      # provision the stable zulu jdk 8 runtime environment as structured in the upstream core
+      - name: Setup JDK 8 (Zulu)
+        uses: actions/setup-java@v5
+        id: setup-java
+        with:
+          distribution: 'zulu'
+          java-version: '8'
+
+      # boot JDKs for the from-source JRE builds (same-major as the target)
+      - name: Setup boot JDK 17 (Zulu)
+        uses: actions/setup-java@v5
+        id: setup-java17
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup boot JDK 21 (Zulu)
+        uses: actions/setup-java@v5
+        id: setup-java21
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Setup boot JDK 25 (Zulu)
+        uses: actions/setup-java@v5
+        id: setup-java25
+        with:
+          distribution: 'zulu'
+          java-version: '25'
+
+      # initialize essential building and packaging utilities via homebrew infrastructure
+      - name: Install brew dependencies
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
+        run: |
+          brew untap aws/tap 2>/dev/null || true
+          brew update
+          brew install make wget ldid autoconf pkg-config
+          sudo mkdir -p /usr/local/bin
+          # map the gmake binary symlink seamlessly across the target build runner paths
+          sudo ln -sf /opt/homebrew/bin/gmake /usr/local/bin/gmake
+
+      - name: Cache iOS JREs
+        id: cache-jres
+        uses: actions/cache@v5
+        with:
+          path: depends/
+          key: amethyst-jres-v2
+
+      # resolve and inject core environmental paths and flags directly into the global execution scope
+      - name: Resolve env (paths, SDK)
+        run: |
+          echo "SDKPATH=$(xcrun --sdk iphoneos --show-sdk-path)" >> $GITHUB_ENV
+          # setup-java's location is not guaranteed to be registered with
+          # /usr/libexec/java_home on macOS runners. Persist it for every
+          # Make invocation, including the earlier JRE-build step.
+          echo "JAVA_HOME=${{ steps.setup-java.outputs.path }}" >> $GITHUB_ENV
+          echo "BOOTJDK=${{ steps.setup-java.outputs.path }}/bin" >> $GITHUB_ENV
+          echo "RUNNER=0" >> $GITHUB_ENV
+
+      - name: Verify tools
+        run: |
+          gmake --version | head -1
+          ldid -V 2>&1 | head -1 || true
+          cmake --version | head -1
+          wget --version | head -1
+          xcrun --sdk iphoneos --show-sdk-version
+          echo "SDKPATH=$SDKPATH"
+
+      # Fetch the official prebuilt iOS arm64 JREs instead of compiling
+      # OpenJDK from source: far faster and immune to the cross-build
+      # configure flakiness (freetype/cups/flags) seen on CI runners.
+      # Cached after the first successful fetch.
+      - name: Fetch prebuilt iOS JREs
+        if: steps.cache-jres.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          export PATH=/opt/homebrew/bin:$PATH
+          export RUNNER=0
+          export JRE_BUILD_MODE=download
+          gmake jre 2> >(grep -v "vtool warning: code signature will be invalid" >&2)
+
+      # Trigger gmake compilation pipelines with inline stderr filtering and execute post-build binary optimization
+      - name: Build sideload IPA & TrollStore tIPA
+        shell: bash
+        run: |
+          JDK_BASE_PATH="${{ steps.setup-java.outputs.path }}"
+          export PATH="$JDK_BASE_PATH/bin:/opt/homebrew/bin:$PATH"
+          export JAVA_HOME="$JDK_BASE_PATH"
+          export BOOTJDK="$JDK_BASE_PATH/bin"
+          export SLIMMED=1
+          
+          export CODE_SIGNING_ALLOWED=NO
+          export CODE_SIGNING_REQUIRED=NO
+          export CODE_SIGN_IDENTITY=""
+
+          export CFLAGS="-Wno-error=implicit-function-declaration $CFLAGS"
+          export CXXFLAGS="-Wno-error=implicit-function-declaration $CXXFLAGS"
+
+          SIGN_FLAGS="CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= APP_ICON=AppIcon-Development"
+
+          # WARNING MITIGATION: Filter runtime stderr streams to suppress repetitive upstream vtool signature warnings
+          gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=2 $SIGN_FLAGS 2> >(grep -v "vtool warning: code signature will be invalid" >&2)
+          
+          gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=2 TROLLSTORE_JIT_ENT=1 $SIGN_FLAGS 2> >(grep -v "vtool warning: code signature will be invalid" >&2)
+
+      - name: List artifacts
+        if: always()
+        run: ls -la artifacts/ || true
+
+      - name: Organize artifacts (full vs slimmed)
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts/full artifacts/slimmed
+          mv artifacts/Witch-slimmed-*.ipa artifacts/slimmed/ 2>/dev/null || true
+          mv artifacts/Witch-slimmed-*.tipa artifacts/slimmed/ 2>/dev/null || true
+          mv artifacts/Witch-*.ipa artifacts/full/ 2>/dev/null || true
+          mv artifacts/Witch-*.tipa artifacts/full/ 2>/dev/null || true
+
+      - name: Upload full IPA & tIPA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Witch-full
+          path: artifacts/full/*
+          retention-days: 30
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Upload slimmed IPA & tIPA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Witch-slimmed
+          path: artifacts/slimmed/*
+          retention-days: 30
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Upload Witch.dSYM
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: Witch.dSYM
+          path: artifacts/Witch.dSYM
+          retention-days: 14
+          if-no-files-found: warn
+          compression-level: 0
+
+      # extract local compilation cmake diagnostic records upon unexpected pipeline failure
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            Natives/build/CMakeFiles/CMakeOutput.log
+            Natives/build/CMakeFiles/CMakeError.log
+          if-no-files-found: ignore
+
+  publish:
+    name: Publish Pre-release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Reset rolling pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete pre-release --cleanup-tag -y 2>/dev/null || true
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/pre-release" 2>/dev/null || true
+
+      - name: Publish Pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pre-release
+          name: Witch Launcher — Pre-release
+          prerelease: true
+          fail_on_unmatched_files: false
+          files: |
+            **/*.ipa
+            **/*.tipa
